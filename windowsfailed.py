@@ -1,98 +1,92 @@
 import os
-import ctypes
-import sys
-import win32evtlog
-from datetime import datetime
+import subprocess
+from datetime import datetime, timedelta, timezone
+import smtplib
+from email.message import EmailMessage
 
-# Folder to store the log files
-LOG_FOLDER = r"C:\failedlogs"
+# Email Configuration
+SMTP_SERVER = "smtp.turnanewleaf.com"
+SMTP_PORT = 587
+EMAIL_ADDRESS = "alerts@turnanewleaf.com"
+# EMAIL_PASSWORD =
+RECIPIENT_EMAIL = "logs@turnanewleaf.com"
 
-def is_admin():
-    """Check if the script is running with administrative privileges."""
+# Define the output directory and file
+output_directory = r"C:\failedlogs"
+output_file = "FailedLoginAttempts.txt"
+output_path = os.path.join(output_directory, output_file)
+
+# Ensure the output directory exists
+try:
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+except Exception as e:
+    print(f"Error creating directory {output_directory}: {e}")
+    exit(1)
+
+# Calculate the timestamp for 30 minutes ago
+time_30_minutes_ago = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# Debug: Print the generated timestamp
+print(f"Generated timestamp for query: {time_30_minutes_ago}")
+
+# Command to fetch failed login attempts (Event ID 4625) from the last 30 minutes
+command = (
+    f'wevtutil qe Security /q:"*[System[(EventID=4625) and TimeCreated[@SystemTime>=\'{time_30_minutes_ago}\']]]" /f:text'
+)
+
+# Debug: Print the command being executed
+print(f"Executing command: {command}")
+
+# Run the command and capture the output
+try:
+    result = subprocess.run(command, capture_output=True, text=True, shell=True, check=True)
+    failed_logins = result.stdout.strip()  # Remove extra whitespace
+    print(f"Command executed successfully. Output length: {len(failed_logins)}")
+except subprocess.CalledProcessError as e:
+    print(f"Error fetching log data: {e}")
+    failed_logins = ""
+
+# Write the output to the file and decide if email should be sent
+email_triggered = False
+try:
+    with open(output_path, "w", encoding="utf-8") as file:
+        if failed_logins:
+            file.write(failed_logins)
+            print(f"Failed login attempts saved to {output_path}")
+            email_triggered = True  # Trigger email only when failed attempts are found
+        else:
+            no_attempts_message = "No failed login attempts were made in the last 30 minutes."
+            file.write(no_attempts_message)
+            print(no_attempts_message)
+except Exception as e:
+    print(f"Error writing to file {output_path}: {e}")
+    exit(1)
+
+# Function to send the email
+def send_email(file_path):
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        return False
+        # Create the email message
+        msg = EmailMessage()
+        msg["Subject"] = "Failed Login Attempts Report"
+        msg["From"] = EMAIL_ADDRESS
+        msg["To"] = RECIPIENT_EMAIL
+        msg.set_content("Attached is the report of failed login attempts from the last 30 minutes.")
 
-def run_as_admin():
-    """Re-run the script with administrative privileges."""
-    try:
-        script = os.path.abspath(sys.argv[0])
-        params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script}" {params}', None, 1)
-        sys.exit()
+        # Attach the file
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+            msg.add_attachment(file_data, maintype="text", subtype="plain", filename=output_file)
+
+        # Connect to the SMTP server and send the email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()  # Upgrade connection to secure
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print("Email sent successfully.")
     except Exception as e:
-        print(f"Failed to elevate permissions: {e}")
-        sys.exit(1)
+        print(f"Error sending email: {e}")
 
-# Ensure the folder exists
-if not os.path.exists(LOG_FOLDER):
-    os.makedirs(LOG_FOLDER)
-
-def fetch_recent_failed_logins():
-    """Fetch the most recent Event ID 4625 entries from the Security log."""
-    log_type = "Security"
-    server = "localhost"  # Local machine
-    failed_logins = []
-
-    # Open the Event Log
-    handle = win32evtlog.OpenEventLog(server, log_type)
-    
-    # Flags for reading events (most recent first)
-    flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
-
-    # Read events
-    events = win32evtlog.ReadEventLog(handle, flags, 0)
-    
-    if not events:
-        print("No events found in the log.")
-    
-    for event in events:
-        if event.EventID == 4625:  # Event ID for failed logins
-            event_time = event.TimeGenerated.strftime("%Y-%m-%d %H:%M:%S")
-            user_info = event.StringInserts[5] if len(event.StringInserts) > 5 else "N/A"
-            ip_address = event.StringInserts[18] if len(event.StringInserts) > 18 else "N/A"
-
-            # Debugging: print out each failed login attempt
-            print(f"Event Found: {event_time} | User: {user_info} | IP: {ip_address}")
-
-            # Record details of the failed login attempt
-            failed_logins.append(f"{event_time} | User: {user_info} | IP: {ip_address}")
-
-            # Limit to the most recent 10 failed logins
-            if len(failed_logins) >= 10:
-                break
-
-    # Close the Event Log
-    win32evtlog.CloseEventLog(handle)
-    
-    if not failed_logins:
-        print("No failed login attempts found.")
-    
-    return failed_logins
-
-def write_log_to_file(failed_logins):
-    """Write the list of failed logins to a timestamped text file."""
-    if not failed_logins:
-        print("No recent failed login attempts found.")
-        return
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(LOG_FOLDER, f"failed_logins_{timestamp}.txt")
-    
-    with open(file_path, "w") as f:
-        f.write(f"=== Failed Login Attempts on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        for login in failed_logins:
-            f.write(f"{login}\n")
-
-    print(f"Log file created: {file_path}")
-
-if __name__ == "__main__":
-    if not is_admin():
-        print("Admin privileges required. Elevating...")
-        run_as_admin()
-
-    # Main logic
-    print("Fetching recent failed login attempts...")
-    recent_logins = fetch_recent_failed_logins()
-    write_log_to_file(recent_logins)
+# Send the email only if there are failed login attempts
+if email_triggered:
+    send_email(output_path)
