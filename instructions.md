@@ -1,9 +1,7 @@
 For the Windows Edition - A couple things may need to be done if the code fails.
 
   Install the following via command prompt
-   
     Launch command prompt as administrator
-    
     enter the following, and wait for it complete
     
     pip install pywin32
